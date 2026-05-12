@@ -128,7 +128,7 @@ def get_ws_url(timeout=30):
             except Exception as e:
                 last_err = e
                 time.sleep(1)
-        raise RuntimeError(f"BU_CDP_URL={url} unreachable after 30s: {last_err} -- is the dedicated automation Chrome running?")
+        raise RuntimeError(f"BU_CDP_URL={url} unreachable after {timeout}s: {last_err} -- is the dedicated automation Chrome running?")
     for base in PROFILES:
         try:
             active = (base / "DevToolsActivePort").read_text().splitlines()
@@ -155,7 +155,7 @@ def get_ws_url(timeout=30):
             except (OSError, KeyError, ValueError):
                 time.sleep(1)
         raise RuntimeError(
-            f"Chrome's remote-debugging page is open, but DevTools is not live yet on 127.0.0.1:{port} — if Chrome opened a profile picker, choose your normal profile first, then tick the checkbox and click Allow if shown"
+            f"DevTools not live on 127.0.0.1:{port} after {timeout}s — if Chrome opened a profile picker, choose your normal profile first, then tick Allow"
         )
     for probe_port in (9222, 9223):
         try:
@@ -283,7 +283,7 @@ class Daemon:
                 self._connect_attempt += 1
                 self._connect_phase = "resolving_ws_url"
                 self._next_retry_at = None
-                url = await asyncio.to_thread(lambda: get_ws_url(timeout=5))
+                url = await asyncio.to_thread(lambda: get_ws_url(timeout=2))
                 log(f"connecting to {url}")
                 self._connect_phase = "starting_cdp_client"
                 cdp = CDPClient(url)
