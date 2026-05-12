@@ -107,14 +107,14 @@ def _ws_from_devtools_active_port(http_url: str) -> str | None:
     return None
 
 
-def get_ws_url():
+def get_ws_url(timeout=30):
     if url := os.environ.get("BU_CDP_WS"):
         return url
     if url := os.environ.get("BU_CDP_URL"):
         # HTTP DevTools endpoint (e.g. http://127.0.0.1:9333) — resolve to ws via /json/version.
         # Use this for a dedicated automation Chrome on a non-default profile, which avoids the
         # M144 "Allow remote debugging" dialog and the M136 default-profile lockdown.
-        deadline = time.time() + 30
+        deadline = time.time() + timeout
         last_err = None
         base_url = url.rstrip("/")
         while time.time() < deadline:
@@ -142,7 +142,7 @@ def get_ws_url():
         # alongside the port in DevToolsActivePort: if Chrome was previously launched
         # with a different --user-data-dir on the same port, that file is left behind
         # with a stale browser UUID and the WS upgrade returns 404.
-        deadline = time.time() + 30
+        deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read())["webSocketDebuggerUrl"]
@@ -197,6 +197,9 @@ class Daemon:
         self._ever_connected = False
         self._ready = False
         self._last_connect_error = None
+        self._connect_phase = "idle"
+        self._connect_attempt = 0
+        self._next_retry_at = None
 
     async def attach_first_page(self):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
@@ -277,14 +280,19 @@ class Daemon:
         while not (self.stop and self.stop.is_set()):
             cdp = None
             try:
-                url = await asyncio.to_thread(get_ws_url)
+                self._connect_attempt += 1
+                self._connect_phase = "resolving_ws_url"
+                self._next_retry_at = None
+                url = await asyncio.to_thread(lambda: get_ws_url(timeout=5))
                 log(f"connecting to {url}")
+                self._connect_phase = "starting_cdp_client"
                 cdp = CDPClient(url)
                 await cdp.start()
                 self.cdp = cdp
                 self._ready = False
                 await self.attach_first_page()
                 self._wire_event_tap(cdp)
+                self._connect_phase = "attached"
                 self._ever_connected = True
                 self._ready = True
                 self._last_connect_error = None
@@ -296,7 +304,9 @@ class Daemon:
                         await cdp.stop()
                 raise
             except Exception as e:
+                self._connect_phase = "backing_off"
                 self._last_connect_error = str(e)
+                self._next_retry_at = time.time() + backoff
                 log(f"CDP connect failed: {e} — retrying in {backoff:.1f}s")
                 if cdp:
                     with suppress(Exception):
@@ -354,6 +364,7 @@ class Daemon:
         )
 
     def _mark_disconnected(self, exc=None):
+        self._connect_phase = "disconnected"
         if exc:
             self._last_connect_error = str(exc)
         old = self.cdp
@@ -375,7 +386,13 @@ class Daemon:
         if meta == "ping":
             return {"pong": True, "pid": os.getpid()}
         if meta == "status":
-            return {"status": self._status, "ready": self._status == "ready", "last_error": self._last_connect_error}
+            return {
+                "status": self._status, "ready": self._status == "ready",
+                "last_error": self._last_connect_error,
+                "phase": self._connect_phase,
+                "attempt": self._connect_attempt,
+                "next_retry_at": self._next_retry_at,
+            }
         if meta == "drain_events":
             out = list(self.events); self.events.clear()
             return {"events": out}

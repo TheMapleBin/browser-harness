@@ -264,7 +264,19 @@ def ensure_daemon(wait=60.0, name=None, env=None):
                 status = _daemon_status(name)
                 if status and status.get("status") == "ready":
                     return
-            restart_daemon(name)
+                if status and status.get("status") in ("connecting", "reconnecting"):
+                    continue
+                # Status changed to something unexpected — break out
+                break
+            # Never restart a lifecycle-aware daemon. If it stays
+            # connecting/reconnecting, the environment/URL is the problem;
+            # restarting with the same environment won't fix it.
+            status = _daemon_status(name) or status or {}
+            raise RuntimeError(
+                f"daemon {name or NAME!r} is alive but browser is not ready "
+                f"(status={status.get('status')}, phase={status.get('phase')}, "
+                f"last_error={status.get('last_error')})"
+            )
         elif status is None:
             try:
                 s, token = ipc.connect(name or NAME, timeout=3.0)
