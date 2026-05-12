@@ -1,8 +1,14 @@
 """CDP WS holder + IPC relay (Unix socket on POSIX, TCP loopback on Windows). One daemon per BU_NAME."""
 import asyncio, json, os, socket, sys, time, urllib.error, urllib.request
+from contextlib import suppress
 from urllib.parse import urlparse
 from collections import deque
 from pathlib import Path
+
+try:
+    from websockets.exceptions import ConnectionClosed
+except ImportError:
+    ConnectionClosed = ()
 
 from . import _ipc as ipc
 from cdp_use.client import CDPClient
@@ -187,16 +193,26 @@ class Daemon:
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
+        self._connecting_task = None
+        self._ever_connected = False
+        self._ready = False
+        self._last_connect_error = None
 
     async def attach_first_page(self):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
+        if not self.cdp:
+            return None
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
         pages = [t for t in targets if is_real_page(t)]
         if not pages:
-            # No real pages — create one instead of attaching to omnibox popup
-            tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
-            log(f"no real pages found, created about:blank ({tid})")
-            pages = [{"targetId": tid, "url": "about:blank", "type": "page"}]
+            # No real pages. Create a placeholder page. Must NOT use
+            # about:blank — INTERNAL filtering strips about: URLs, so the
+            # next attach_first_page() call would fail to find this page
+            # and create another, leaking tabs.
+            placeholder = "data:text/html,<title>Browser Harness</title>"
+            tid = (await self.cdp.send_raw("Target.createTarget", {"url": placeholder}))["targetId"]
+            log(f"no real pages found, created placeholder ({tid})")
+            pages = [{"targetId": tid, "url": placeholder, "type": "page"}]
         self.session = (await self.cdp.send_raw(
             "Target.attachToTarget", {"targetId": pages[0]["targetId"], "flatten": True}
         ))["sessionId"]
@@ -229,23 +245,69 @@ class Daemon:
                 log(f"enable {d} on {session_id}: {e}")
         await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")))
 
-    async def start(self):
-        self.stop = asyncio.Event()
-        url = get_ws_url()
-        log(f"connecting to {url}")
-        self.cdp = CDPClient(url)
+    # ── lifecycle state ──────────────────────────────
+    @property
+    def _status(self):
+        if self._ready and self.cdp:
+            return "ready"
+        if self._ever_connected:
+            return "reconnecting"
+        return "connecting"
+
+    def _clear_cdp_state(self):
+        self.cdp = None
+        self.session = None
+        self.target_id = None
+        self.dialog = None
+        self._ready = False
+
+    async def _sleep_or_stopped(self, seconds):
+        if not self.stop:
+            await asyncio.sleep(seconds)
+            return False
         try:
-            await self.cdp.start()
-        except Exception as e:
-            if os.environ.get("BU_CDP_WS"):
-                raise RuntimeError(
-                    f"CDP WS handshake failed: {e} -- remote browser WebSocket connection failed. "
-                    "This can happen when network policy blocks the connection, the WS URL is wrong or expired, or the remote endpoint is down. "
-                    "If you use Browser Use cloud, verify BROWSER_USE_API_KEY and get a fresh URL via start_remote_daemon()."
-                )
-            raise RuntimeError(f"CDP WS handshake failed: {e} -- click Allow in Chrome if prompted, then retry")
-        await self.attach_first_page()
-        orig = self.cdp._event_registry.handle_event
+            await asyncio.wait_for(self.stop.wait(), timeout=seconds)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def _connect_cdp(self):
+        backoff = 0.5
+        max_backoff = 30.0
+        while not (self.stop and self.stop.is_set()):
+            cdp = None
+            try:
+                url = await asyncio.to_thread(get_ws_url)
+                log(f"connecting to {url}")
+                cdp = CDPClient(url)
+                await cdp.start()
+                self.cdp = cdp
+                self._ready = False
+                await self.attach_first_page()
+                self._wire_event_tap(cdp)
+                self._ever_connected = True
+                self._ready = True
+                self._last_connect_error = None
+                log("CDP connected")
+                return
+            except asyncio.CancelledError:
+                if cdp:
+                    with suppress(Exception):
+                        await cdp.stop()
+                raise
+            except Exception as e:
+                self._last_connect_error = str(e)
+                log(f"CDP connect failed: {e} — retrying in {backoff:.1f}s")
+                if cdp:
+                    with suppress(Exception):
+                        await cdp.stop()
+                self._clear_cdp_state()
+                if await self._sleep_or_stopped(backoff):
+                    return
+                backoff = min(backoff * 2, max_backoff)
+
+    def _wire_event_tap(self, cdp):
+        orig = cdp._event_registry.handle_event
         mark_js = "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"
         async def tap(method, params, session_id=None):
             self.events.append({"method": method, "params": params, "session_id": session_id})
@@ -253,47 +315,100 @@ class Daemon:
                 self.dialog = params
             elif method == "Page.javascriptDialogClosed":
                 self.dialog = None
-            elif method in ("Page.loadEventFired", "Page.domContentEventFired"):
-                asyncio.create_task(_silent(asyncio.wait_for(self.cdp.send_raw("Runtime.evaluate", {"expression": mark_js}, session_id=self.session), timeout=2)))
+            elif (
+                method in ("Page.loadEventFired", "Page.domContentEventFired")
+                and self.cdp is cdp
+                and self.session
+            ):
+                asyncio.create_task(_silent(asyncio.wait_for(
+                    cdp.send_raw("Runtime.evaluate", {"expression": mark_js}, session_id=self.session),
+                    timeout=2,
+                )))
             return await orig(method, params, session_id)
-        self.cdp._event_registry.handle_event = tap
+        cdp._event_registry.handle_event = tap
+
+    def _ensure_connecting(self):
+        if self.stop and self.stop.is_set():
+            return
+        if self._connecting_task and not self._connecting_task.done():
+            return
+        self._connecting_task = asyncio.create_task(self._connect_cdp())
+
+    def _is_cdp_disconnect(self, exc):
+        seen = set()
+        cur = exc
+        while cur and id(cur) not in seen:
+            seen.add(id(cur))
+            if isinstance(cur, ConnectionClosed):
+                return True
+            if isinstance(cur, ConnectionError):
+                msg = str(cur).lower()
+                if "websocket connection closed" in msg or "client is stopping" in msg:
+                    return True
+            cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+        msg = str(exc).lower()
+        return (
+            "websocket connection closed" in msg
+            or "no close frame received" in msg
+            or "received 1006" in msg
+        )
+
+    def _mark_disconnected(self, exc=None):
+        if exc:
+            self._last_connect_error = str(exc)
+        old = self.cdp
+        self._clear_cdp_state()
+        if old:
+            asyncio.create_task(_silent(old.stop()))
+        self._ensure_connecting()
+
+    async def start(self):
+        self.stop = asyncio.Event()
+        self._ensure_connecting()
 
     async def handle(self, req):
-        # Token guard for Windows TCP loopback: any local process can otherwise
-        # connect and issue CDP commands. expected_token() is None on POSIX so
-        # this check is a no-op there (AF_UNIX + chmod 600 is the boundary).
         expected = ipc.expected_token()
         if expected is not None and req.get("token") != expected:
             return {"error": "unauthorized"}
         meta = req.get("meta")
-        # Liveness probe — lets clients confirm the listener is actually this
-        # daemon and not an unrelated process that reused our port post-crash.
-        # `pid` lets restart_daemon() verify the live daemon's identity before
-        # signaling — protects against SIGTERM-by-stale-pid-file after PID reuse.
-        if meta == "ping":        return {"pong": True, "pid": os.getpid()}
+
+        if meta == "ping":
+            return {"pong": True, "pid": os.getpid()}
+        if meta == "status":
+            return {"status": self._status, "ready": self._status == "ready", "last_error": self._last_connect_error}
         if meta == "drain_events":
             out = list(self.events); self.events.clear()
             return {"events": out}
-        if meta == "session":     return {"session_id": self.session}
+        if meta == "shutdown":
+            self.stop.set(); return {"ok": True}
+
+        if meta == "session":
+            return {"session_id": self.session, "status": self._status}
+        if meta == "pending_dialog":
+            return {"dialog": self.dialog}
+
         if meta == "current_tab":
-            # Resolve the attached page's target info server-side. Helpers can't
-            # send Target.getTargetInfo themselves: daemon strips session_id for
-            # any Target.* method (browser-level call), and without a targetId
-            # Chrome silently returns the *browser* target.
-            if not self.target_id:
-                return {"error": "not_attached"}
+            if not self._ready or not self.cdp or not self.target_id:
+                return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
             try:
                 info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": self.target_id}))["targetInfo"]
-            except Exception:
-                return {"error": "cdp_disconnected"}
+            except Exception as e:
+                if self._is_cdp_disconnect(e):
+                    self._mark_disconnected(e)
+                    return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
+                return {"error": str(e), "status": self._status}
             return {"targetId": info.get("targetId"), "url": info.get("url", ""), "title": info.get("title", "")}
+
         if meta == "connection_status":
-            if not self.target_id:
-                return {"error": "not_attached"}
+            if not self._ready or not self.cdp or not self.target_id:
+                return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
             try:
                 info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": self.target_id}))["targetInfo"]
-            except Exception:
-                return {"error": "cdp_disconnected"}
+            except Exception as e:
+                if self._is_cdp_disconnect(e):
+                    self._mark_disconnected(e)
+                    return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
+                return {"error": str(e), "status": self._status}
             page = None
             if is_real_page(info):
                 page = {
@@ -301,19 +416,14 @@ class Daemon:
                     "title": info.get("title") or "(untitled)",
                     "url": info.get("url") or "",
                 }
-            return {"target_id": self.target_id, "session_id": self.session, "page": page}
+            return {"target_id": self.target_id, "session_id": self.session, "page": page, "status": "ready"}
+
         if meta == "set_session":
+            if not self._ready or not self.cdp:
+                return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
             old_session = self.session
             self.session = req.get("session_id")
             self.target_id = req.get("target_id") or self.target_id
-            # Run the old-session Network.disable (defense in depth — keeps
-            # background-tab traffic out of the global event buffer; the
-            # consumer-side filter in wait_for_network_idle is the actual
-            # correctness gate) in parallel with the four enables on the new
-            # session. Different sessions, independent CDP requests. Keeps
-            # the synchronous reply under the helper's 5s IPC read timeout
-            # even on a remote daemon — sequentially these would have stacked
-            # to ~22s worst case.
             tasks = []
             if old_session and old_session != self.session:
                 async def disable_old():
@@ -326,8 +436,6 @@ class Daemon:
                 tasks.append(disable_old())
             tasks.append(self._enable_default_domains(self.session))
             await asyncio.gather(*tasks)
-            # 🐴 tab-marker title prefix is purely cosmetic — fire-and-forget so
-            # it doesn't add to the synchronous IPC budget.
             asyncio.create_task(_silent(asyncio.wait_for(
                 self.cdp.send_raw(
                     "Runtime.evaluate",
@@ -336,24 +444,44 @@ class Daemon:
                 ),
                 timeout=2,
             )))
-            return {"session_id": self.session}
-        if meta == "pending_dialog": return {"dialog": self.dialog}
-        if meta == "shutdown":    self.stop.set(); return {"ok": True}
+            return {"session_id": self.session, "status": self._status}
 
         method = req["method"]
         params = req.get("params") or {}
-        # Browser-level Target.* calls must not use a session (stale or otherwise).
-        # For everything else, explicit session in req wins; else default.
         sid = None if method.startswith("Target.") else (req.get("session_id") or self.session)
+
+        if not self._ready or not self.cdp:
+            return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
+
         try:
             return {"result": await self.cdp.send_raw(method, params, session_id=sid)}
         except Exception as e:
             msg = str(e)
             if "Session with given id not found" in msg and sid == self.session and sid:
                 log(f"stale session {sid}, re-attaching")
-                if await self.attach_first_page():
-                    return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
-            return {"error": msg}
+                try:
+                    if await self.attach_first_page():
+                        return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
+                except Exception as reattach_error:
+                    if self._is_cdp_disconnect(reattach_error):
+                        self._mark_disconnected(reattach_error)
+                        return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
+                    return {"error": str(reattach_error), "status": self._status}
+            if self._is_cdp_disconnect(e):
+                log(f"CDP disconnected: {e} — scheduling reconnect")
+                self._mark_disconnected(e)
+                return {"error": "cdp_disconnected", "status": self._status, "last_error": self._last_connect_error}
+            return {"error": msg, "status": self._status}
+
+    async def close(self):
+        if self._connecting_task and not self._connecting_task.done():
+            self._connecting_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._connecting_task
+        if self.cdp:
+            with suppress(Exception):
+                await self.cdp.stop()
+        self._clear_cdp_state()
 
 
 async def serve(d):
@@ -392,7 +520,10 @@ async def serve(d):
 async def main():
     d = Daemon()
     await d.start()
-    await serve(d)
+    try:
+        await serve(d)
+    finally:
+        await d.close()
 
 
 def already_running():

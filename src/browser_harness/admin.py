@@ -186,6 +186,22 @@ def _daemon_endpoint_names():
     return names
 
 
+def _daemon_status(name):
+    """Return the daemon lifecycle status dict, or None if unreachable or pre-lifecycle daemon."""
+    c = None
+    try:
+        c, token = ipc.connect(name, timeout=1.0)
+        resp = ipc.request(c, token, {"meta": "status"})
+        if "status" in resp:
+            return resp
+        return None
+    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, socket.timeout, OSError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+    finally:
+        if c:
+            c.close()
+
+
 def _daemon_browser_connection(name):
     c = None
     try:
@@ -226,18 +242,40 @@ def _doctor_short_text(value, limit=None):
 
 
 def ensure_daemon(wait=60.0, name=None, env=None):
-    """Idempotent. Self-heals stale daemon, cold Chrome, and missing Allow on chrome://inspect."""
+    """Idempotent. Self-heals stale daemon, cold Chrome, and missing Allow on chrome://inspect.
+
+    Lifecycle-aware daemons expose a status field (connecting / ready / reconnecting).
+    They are not killed during connecting/reconnecting; the caller waits instead."""
     if daemon_alive(name):
-        # Stale daemons accept connects AND reply to meta:* (pure Python) even when the
-        # CDP WS to Chrome is dead — probe with a real CDP call and require "result".
-        # Must go through ipc.connect so this works on Windows (TCP loopback) too;
-        # raw AF_UNIX here would fail on every warm call and churn the daemon.
-        try:
-            s, token = ipc.connect(name or NAME, timeout=3.0)
-            resp = ipc.request(s, token, {"method": "Target.getTargets", "params": {}})
-            if "result" in resp: return
-        except Exception: pass
-        restart_daemon(name)
+        status = _daemon_status(name)
+        if status and status.get("status") == "ready":
+            try:
+                s, token = ipc.connect(name or NAME, timeout=3.0)
+                resp = ipc.request(s, token, {"method": "Target.getTargets", "params": {}})
+                if "result" in resp:
+                    return
+            except Exception:
+                pass
+            restart_daemon(name)
+        elif status and status.get("status") in ("connecting", "reconnecting"):
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                time.sleep(0.5)
+                status = _daemon_status(name)
+                if status and status.get("status") == "ready":
+                    return
+            restart_daemon(name)
+        elif status is None:
+            try:
+                s, token = ipc.connect(name or NAME, timeout=3.0)
+                resp = ipc.request(s, token, {"method": "Target.getTargets", "params": {}})
+                if "result" in resp:
+                    return
+            except Exception:
+                pass
+            restart_daemon(name)
+        else:
+            restart_daemon(name)
 
     import subprocess, sys
     local = _is_local_chrome_mode(env)
@@ -249,8 +287,20 @@ def ensure_daemon(wait=60.0, name=None, env=None):
         )
         deadline = time.time() + wait
         while time.time() < deadline:
-            if daemon_alive(name): return
-            if p.poll() is not None: break
+            if p.poll() is not None:
+                break
+            status = _daemon_status(name)
+            if status and status.get("status") == "ready":
+                return
+            if status is None and daemon_alive(name):
+                time.sleep(0.3)
+                try:
+                    s, token = ipc.connect(name or NAME, timeout=3.0)
+                    resp = ipc.request(s, token, {"method": "Target.getTargets", "params": {}})
+                    if "result" in resp:
+                        return
+                except Exception:
+                    pass
             time.sleep(0.2)
         msg = _log_tail(name) or ""
         if local and attempt == 0 and _needs_chrome_remote_debugging_prompt(msg):
