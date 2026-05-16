@@ -1,74 +1,127 @@
-<img src="https://raw.githubusercontent.com/browser-use/media/main/browser-harness/banner-ink.svg" alt="Browser Harness" width="100%" />
+# ZSClib Portal Auto Login Portable Package
 
-# Browser Harness ♞
+这是一个可迁移到其他 Windows 电脑使用的 ZSClib 校园网 Portal 自动认证项目副本。
 
-Connect an LLM directly to your real browser with a thin, editable CDP harness. For browser tasks where you need **complete freedom**.
-
-One websocket to Chrome, nothing between. The agent writes what's missing during execution. The harness improves itself every run.
-
-```
-  ● agent: wants to upload a file
-  │
-  ● agent-workspace/agent_helpers.py → helper missing
-  │
-  ● agent writes it                         agent_helpers.py
-  │                                                       + custom helper
-  ✓ file uploaded
-```
-
-**You will never use the browser again.**
-
-## Setup prompt
-
-Paste into Claude Code or Codex:
+它不保存用户名和密码。用户名、密码、记住密码状态和 Portal Cookie 只保存在专用 Chrome Profile：
 
 ```text
-Set up https://github.com/browser-use/browser-harness for me.
-
-Read `install.md` and follow the steps to install browser-harness and connect it to my browser.
+C:\BrowserProfiles\ZSClibAutoLogin
 ```
 
-The agent will open `chrome://inspect/#remote-debugging`. Tick the checkbox so the agent can connect to your browser:
+## 迁移到新电脑
 
-<img src="docs/setup-remote-debugging.png" alt="Remote debugging setup" width="520" style="border-radius: 12px;" />
+1. 将整个 `browser-harness-zsclib-portable` 文件夹复制到新电脑，例如：
 
-Click Allow when the per-attach popup appears (Chrome 144+):
+```text
+C:\Tools\browser-harness-zsclib-portable
+```
 
-<img src="docs/allow-remote-debugging.png" alt="Allow remote debugging popup" width="520" style="border-radius: 12px;" />
+2. 安装 Google Chrome。
 
-See [agent-workspace/domain-skills/](agent-workspace/domain-skills/) for example tasks.
+3. 安装 Python 3.11 或更新版本，并勾选 Add Python to PATH。
 
-## Free Browser Use Cloud browsers
+4. 在 PowerShell 中进入项目目录并安装本地运行环境：
 
-Stealth, sub-agents, or headless deployment.<br>
-**Browser Use Cloud free tier: 3 concurrent browsers, proxies, captcha solving, and more. No card required.**
+```powershell
+cd "C:\Tools\browser-harness-zsclib-portable"
+powershell.exe -ExecutionPolicy Bypass -File ".\windows\setup_zsclib_portable.ps1"
+```
 
-- Grab a key at [cloud.browser-use.com/new-api-key](https://cloud.browser-use.com/new-api-key)
-- Or let the agent sign up itself via [docs.browser-use.com/llms.txt](https://docs.browser-use.com/llms.txt) (setup flow + challenge context included).
+5. 连接 WiFi：`ZSClib`。
 
-## Architecture (~1k lines across 4 core files)
+6. 初始化专用 Chrome Profile：
 
-- `install.md` — first-time install and browser bootstrap
-- `SKILL.md` — day-to-day usage
-- `src/browser_harness/` — protected core package
-- `agent-workspace/agent_helpers.py` — helper code the agent edits
-- `agent-workspace/domain-skills/` — reusable site-specific skills the agent edits
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File ".\windows\initialize_zsclib_profile.ps1"
+```
 
-## Contributing
+在打开的 Chrome 中：
 
-PRs and improvements welcome. The best way to help: **contribute a new domain skill** under [agent-workspace/domain-skills/](agent-workspace/domain-skills/) for a site or task you use often (LinkedIn outreach, ordering on Amazon, filing expenses, etc.). Each skill teaches the agent the selectors, flows, and edge cases it would otherwise have to rediscover.
+- 进入或等待跳转到认证页
+- 输入账号和密码
+- 勾选记住密码
+- 点击认证页的确定/登录按钮
+- 确认网络可用后关闭 Chrome
 
-- **Skills are written by the harness, not by you.** Just run your task with the agent — when it figures something non-obvious out, it files the skill itself (see [SKILL.md](SKILL.md)). Please don't hand-author skill files; agent-generated ones reflect what actually works in the browser.
-- Open a PR with the generated `agent-workspace/domain-skills/<site>/` folder — small and focused is great.
-- Bug fixes, docs tweaks, and helper improvements are equally welcome.
-- Browse existing skills (`github/`, `linkedin/`, `amazon/`, ...) to see the shape.
+7. 注册自动认证计划任务：
 
-If you're not sure where to start, open an issue and we'll point you somewhere useful.
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File ".\windows\install_zsclib_task_admin.ps1" -WlanEventDelaySeconds 1
+```
 
-## Domain skills
+出现 UAC 时允许管理员权限。管理员窗口显示 `Verified task state:` 后按 Enter 关闭。
 
-Set `BH_DOMAIN_SKILLS=1` to enable [agent-workspace/domain-skills/](agent-workspace/domain-skills/) — community-contributed per-site playbooks `goto_url` surfaces by domain. Contribute via PR.
+## 工作方式
 
----
+- Windows 连接到 `ZSClib` 后，计划任务延迟 1 秒执行。
+- PowerShell 以隐藏窗口运行。
+- Chrome 以 headless 模式运行，不弹出到屏幕。
+- Chrome 只访问一次：
 
-[The Bitter Lesson of Agent Harnesses](https://browser-use.com/posts/bitter-lesson-agent-harnesses) · [Web Agents That Actually Learn](https://browser-use.com/posts/web-agents-that-actually-learn)
+```text
+http://www.msftconnecttest.com/redirect
+```
+
+- browser-harness 接管这个已打开的页面：
+  - 如果当前 URL 是 `172.16.20.119/eportal/success.jsp...`，认为已经在线并退出。
+  - 如果当前 URL 是 `172.16.20.119/eportal/...` 且存在 `#loginLink`，点击确定。
+  - 如果当前 URL 不是 Portal，认为已经联网或未被 Portal 拦截并退出。
+
+## 手动测试
+
+```powershell
+cd "C:\Tools\browser-harness-zsclib-portable"
+powershell.exe -ExecutionPolicy Bypass -File ".\windows\run_zsclib_auto_login.ps1"
+Get-Content ".\logs\zsclib_auto_login.log" -Tail 80
+```
+
+正常日志应包含：
+
+```text
+runner version: 2026-05-16-msftconnecttest-v3
+trigger: http://www.msftconnecttest.com/redirect
+starting Chrome: ... --headless=new ... http://www.msftconnecttest.com/redirect
+initial_current_url
+```
+
+不应再出现：
+
+```text
+portal precheck
+neverssl
+open_trigger_url
+```
+
+## 卸载
+
+删除计划任务：
+
+```powershell
+Unregister-ScheduledTask -TaskName "ZSClib Portal Auto Login" -Confirm:$false
+```
+
+删除专用 Chrome Profile：
+
+```powershell
+Remove-Item -LiteralPath "C:\BrowserProfiles\ZSClibAutoLogin" -Recurse -Force
+```
+
+删除项目目录即可移除本项目。删除 Chrome Profile 会清除保存的 Portal 账号密码状态。
+
+## 可调参数
+
+默认参数适用于当前 ZSClib 场景：
+
+```text
+SSID: ZSClib
+Chrome Profile: C:\BrowserProfiles\ZSClibAutoLogin
+CDP URL: http://127.0.0.1:9222
+Trigger URL: http://www.msftconnecttest.com/redirect
+Task delay after WLAN event: 1 second
+```
+
+如果需要改 Profile 路径或端口，可以在运行脚本时传参，例如：
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File ".\windows\run_zsclib_auto_login.ps1" -ChromeProfile "D:\BrowserProfiles\ZSClibAutoLogin" -CdpPort 9223
+```

@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.log
 .env
+.venv/
 uv.lock
 *.egg-info/
 .idea/
