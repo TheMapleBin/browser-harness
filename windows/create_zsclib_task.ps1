@@ -1,8 +1,10 @@
 param(
     [string]$TaskName = "ZSClib Portal Auto Login",
     [string]$TargetSsid = "ZSClib",
-    [int]$DelaySeconds = 30,
+    [int]$DelaySeconds = 1,
     [int]$WlanEventDelaySeconds = 1,
+    [int]$LogonRetryIntervalMinutes = 1,
+    [int]$LogonRetryDurationMinutes = 5,
     [switch]$NoWlanEvent,
     [switch]$RunNow
 )
@@ -14,6 +16,14 @@ $RunScript = Join-Path $PSScriptRoot "run_zsclib_auto_login.ps1"
 
 if (-not (Test-Path -LiteralPath $RunScript)) {
     throw "run script not found: $RunScript"
+}
+
+if ($LogonRetryIntervalMinutes -lt 1) {
+    throw "LogonRetryIntervalMinutes must be 1 or greater."
+}
+
+if ($LogonRetryDurationMinutes -lt $LogonRetryIntervalMinutes) {
+    throw "LogonRetryDurationMinutes must be greater than or equal to LogonRetryIntervalMinutes."
 }
 
 function Escape-Xml {
@@ -76,6 +86,13 @@ $actionArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}
 $escapedActionArgs = Escape-Xml $actionArgs
 $escapedTaskName = Escape-Xml $TaskName
 $escapedTargetSsid = Escape-Xml $TargetSsid
+$logonRepetitionXml = @"
+      <Repetition>
+        <Interval>PT${LogonRetryIntervalMinutes}M</Interval>
+        <Duration>PT${LogonRetryDurationMinutes}M</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+"@
 
 $wlanTriggerXml = ""
 if (-not $NoWlanEvent) {
@@ -105,6 +122,7 @@ $taskXml = @"
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
+$logonRepetitionXml
       <Enabled>true</Enabled>
       <Delay>PT${DelaySeconds}S</Delay>
     </LogonTrigger>
@@ -160,7 +178,7 @@ if (-not $registeredTask) {
 
 Write-Output "Registered task: $TaskName"
 Write-Output "Action: powershell.exe $actionArgs"
-Write-Output "Trigger: At logon, delay ${DelaySeconds}s"
+Write-Output "Trigger: At logon, delay ${DelaySeconds}s, repeat every ${LogonRetryIntervalMinutes}m for ${LogonRetryDurationMinutes}m"
 if (-not $NoWlanEvent) {
     Write-Output "Trigger: WLAN AutoConfig EventID=8001, SSID=$escapedTargetSsid, delay ${WlanEventDelaySeconds}s"
 }

@@ -1,5 +1,7 @@
 param(
-    [int]$WlanEventDelaySeconds = 1
+    [int]$WlanEventDelaySeconds = 1,
+    [int]$LogonRetryIntervalMinutes = 1,
+    [int]$LogonRetryDurationMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,13 +17,18 @@ if (-not $isAdmin) {
         "-ExecutionPolicy", "Bypass",
         "-NoExit",
         "-File", "`"$PSCommandPath`"",
-        "-WlanEventDelaySeconds", $WlanEventDelaySeconds
+        "-WlanEventDelaySeconds", $WlanEventDelaySeconds,
+        "-LogonRetryIntervalMinutes", $LogonRetryIntervalMinutes,
+        "-LogonRetryDurationMinutes", $LogonRetryDurationMinutes
     )
     Start-Process powershell.exe -Verb RunAs -ArgumentList $args
     exit 0
 }
 
-& $createScript -WlanEventDelaySeconds $WlanEventDelaySeconds
+& $createScript `
+    -WlanEventDelaySeconds $WlanEventDelaySeconds `
+    -LogonRetryIntervalMinutes $LogonRetryIntervalMinutes `
+    -LogonRetryDurationMinutes $LogonRetryDurationMinutes
 
 Write-Output ""
 Write-Output "Task XML snapshot:"

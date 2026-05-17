@@ -47,6 +47,23 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
         self.assertIn("[int]$WlanEventDelaySeconds = 1", text)
         self.assertIn("-WindowStyle Hidden", text)
 
+    def test_task_retries_after_logon_to_catch_startup_wifi_autoconnect(self):
+        text = (ROOT / "windows" / "create_zsclib_task.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[int]$LogonRetryIntervalMinutes = 1", text)
+        self.assertIn("[int]$LogonRetryDurationMinutes = 5", text)
+        self.assertIn("<Repetition>", text)
+        self.assertIn("<Interval>PT${LogonRetryIntervalMinutes}M</Interval>", text)
+        self.assertIn("<Duration>PT${LogonRetryDurationMinutes}M</Duration>", text)
+
+    def test_runner_waits_briefly_for_target_ssid_after_startup(self):
+        text = (ROOT / "windows" / "run_zsclib_auto_login.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[int]$WaitForTargetSsidSeconds = 60", text)
+        self.assertIn("[int]$SsidPollIntervalSeconds = 2", text)
+        self.assertIn("function Wait-ForTargetSsid", text)
+        self.assertIn("waiting for SSID", text)
+
     def test_runner_uses_msftconnecttest_only(self):
         text = (ROOT / "windows" / "run_zsclib_auto_login.ps1").read_text(encoding="utf-8")
 
@@ -72,6 +89,7 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
 
         self.assertIn("function Get-RecentConnectedSsidFromEventLog", text)
         self.assertIn("Get-WinEvent", text)
+        self.assertIn("[int]$SsidEventFallbackMaxAgeSeconds = 1800", text)
         self.assertIn("SsidEventFallbackMaxAgeSeconds", text)
         self.assertIn("SSID from recent WLAN event fallback", text)
 
@@ -89,6 +107,10 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
         text = (ROOT / "windows" / "install_zsclib_task_admin.ps1").read_text(encoding="utf-8")
 
         self.assertIn("[int]$WlanEventDelaySeconds = 1", text)
+        self.assertIn("[int]$LogonRetryIntervalMinutes = 1", text)
+        self.assertIn("[int]$LogonRetryDurationMinutes = 5", text)
+        self.assertIn("-LogonRetryIntervalMinutes", text)
+        self.assertIn("-LogonRetryDurationMinutes", text)
         self.assertIn("-Verb RunAs", text)
         self.assertIn("-NoExit", text)
         self.assertIn("ReadLine", text)
@@ -125,6 +147,13 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
         self.assertIn("install_zsclib_task_admin.ps1", text)
         self.assertIn("C:\\BrowserProfiles\\ZSClibAutoLogin", text)
         self.assertIn("不保存用户名和密码", text)
+
+    def test_readme_documents_startup_autoconnect_retry_window(self):
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("开机自动连接", text)
+        self.assertIn("每 1 分钟", text)
+        self.assertIn("5 分钟", text)
 
 
 if __name__ == "__main__":

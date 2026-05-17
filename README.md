@@ -46,7 +46,7 @@ powershell.exe -ExecutionPolicy Bypass -File ".\windows\initialize_zsclib_profil
 7. 注册自动认证计划任务：
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File ".\windows\install_zsclib_task_admin.ps1" -WlanEventDelaySeconds 1
+powershell.exe -ExecutionPolicy Bypass -File ".\windows\install_zsclib_task_admin.ps1" -WlanEventDelaySeconds 1 -LogonRetryIntervalMinutes 1 -LogonRetryDurationMinutes 5
 ```
 
 出现 UAC 时允许管理员权限。管理员窗口显示 `Verified task state:` 后按 Enter 关闭。
@@ -54,6 +54,8 @@ powershell.exe -ExecutionPolicy Bypass -File ".\windows\install_zsclib_task_admi
 ## 工作方式
 
 - Windows 连接到 `ZSClib` 后，计划任务延迟 1 秒执行。
+- 为了覆盖开机自动连接但 WLAN 事件早于用户登录的情况，登录后计划任务会在 5 分钟内每 1 分钟重试一次。
+- 每次 runner 启动后会最多等待 60 秒检测 `ZSClib` 是否已经成为当前 SSID；只有检测到 `ZSClib` 才会继续启动 Chrome。
 - PowerShell 以隐藏窗口运行。
 - Chrome 以 headless 模式运行，不弹出到屏幕。
 - Chrome 只访问一次：
@@ -118,6 +120,8 @@ Chrome Profile: C:\BrowserProfiles\ZSClibAutoLogin
 CDP URL: http://127.0.0.1:9222
 Trigger URL: http://www.msftconnecttest.com/redirect
 Task delay after WLAN event: 1 second
+Logon retry window: every 1 minute for 5 minutes
+Runner waits for ZSClib SSID: up to 60 seconds
 ```
 
 如果需要改 Profile 路径或端口，可以在运行脚本时传参，例如：

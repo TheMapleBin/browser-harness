@@ -3,7 +3,9 @@ param(
     [int]$CdpPort = 9222,
     [string]$ChromeProfile = "C:\BrowserProfiles\ZSClibAutoLogin",
     [string]$TriggerUrl = "http://www.msftconnecttest.com/redirect",
-    [int]$SsidEventFallbackMaxAgeSeconds = 120,
+    [int]$SsidEventFallbackMaxAgeSeconds = 1800,
+    [int]$WaitForTargetSsidSeconds = 60,
+    [int]$SsidPollIntervalSeconds = 2,
     [switch]$ReloadHarnessDaemon
 )
 
@@ -15,7 +17,7 @@ $LoginScript = Join-Path $RepoRoot "scripts\zsclib_auto_login.py"
 $LogDir = Join-Path $RepoRoot "logs"
 $LogFile = Join-Path $LogDir "zsclib_auto_login.log"
 $CdpUrl = "http://127.0.0.1:$CdpPort"
-$RunnerVersion = "2026-05-16-msftconnecttest-v3"
+$RunnerVersion = "2026-05-17-startup-autoconnect-v4"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -63,6 +65,28 @@ function Get-RecentConnectedSsidFromEventLog {
         Write-Log "WLAN event fallback failed: $($_.Exception.Message)"
     }
     return $null
+}
+
+function Wait-ForTargetSsid {
+    $deadline = (Get-Date).AddSeconds($WaitForTargetSsidSeconds)
+    $ssid = $null
+
+    while ($true) {
+        $ssid = Get-CurrentSsid
+        Write-Log "current SSID: $ssid"
+        if ($ssid -eq $TargetSsid) {
+            return $ssid
+        }
+
+        $remainingSeconds = [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+        if ($remainingSeconds -le 0 -or $WaitForTargetSsidSeconds -le 0) {
+            return $ssid
+        }
+
+        $sleepSeconds = [Math]::Min($SsidPollIntervalSeconds, $remainingSeconds)
+        Write-Log "waiting for SSID $TargetSsid; current SSID: $ssid; retrying in ${sleepSeconds}s"
+        Start-Sleep -Seconds $sleepSeconds
+    }
 }
 
 function Test-CdpEndpoint {
@@ -264,8 +288,7 @@ function Invoke-BrowserHarnessScript {
 
 try {
     Write-Log "runner version: $RunnerVersion; repo: $RepoRoot; trigger: $TriggerUrl; cdp: $CdpUrl"
-    $ssid = Get-CurrentSsid
-    Write-Log "current SSID: $ssid"
+    $ssid = Wait-ForTargetSsid
     if ($ssid -ne $TargetSsid) {
         Write-Log "SSID is not $TargetSsid; skipping portal login."
         exit 0
