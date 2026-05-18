@@ -3,9 +3,10 @@ param(
     [int]$CdpPort = 9222,
     [string]$ChromeProfile = "C:\BrowserProfiles\ZSClibAutoLogin",
     [string]$TriggerUrl = "http://www.msftconnecttest.com/redirect",
-    [int]$SsidEventFallbackMaxAgeSeconds = 1800,
-    [int]$WaitForTargetSsidSeconds = 60,
+    [int]$SsidEventFallbackMaxAgeSeconds = 120,
+    [int]$WaitForTargetSsidSeconds = 180,
     [int]$SsidPollIntervalSeconds = 2,
+    [switch]$SkipWindowsConnectivityCheck,
     [switch]$ReloadHarnessDaemon
 )
 
@@ -17,7 +18,7 @@ $LoginScript = Join-Path $RepoRoot "scripts\zsclib_auto_login.py"
 $LogDir = Join-Path $RepoRoot "logs"
 $LogFile = Join-Path $LogDir "zsclib_auto_login.log"
 $CdpUrl = "http://127.0.0.1:$CdpPort"
-$RunnerVersion = "2026-05-17-startup-autoconnect-v4"
+$RunnerVersion = "2026-05-18-startup-autoconnect-v5"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -77,6 +78,10 @@ function Wait-ForTargetSsid {
         if ($ssid -eq $TargetSsid) {
             return $ssid
         }
+        if ($ssid -and $ssid -ne $TargetSsid) {
+            Write-Log "connected to non-target SSID $ssid; not waiting for $TargetSsid."
+            return $ssid
+        }
 
         $remainingSeconds = [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
         if ($remainingSeconds -le 0 -or $WaitForTargetSsidSeconds -le 0) {
@@ -87,6 +92,27 @@ function Wait-ForTargetSsid {
         Write-Log "waiting for SSID $TargetSsid; current SSID: $ssid; retrying in ${sleepSeconds}s"
         Start-Sleep -Seconds $sleepSeconds
     }
+}
+
+function Test-TargetNetworkHasInternet {
+    try {
+        $profiles = Get-NetConnectionProfile -ErrorAction Stop |
+            Where-Object { $_.Name -eq $TargetSsid }
+
+        foreach ($profile in $profiles) {
+            $ipv4 = [string]$profile.IPv4Connectivity
+            $ipv6 = [string]$profile.IPv6Connectivity
+            Write-Log "Windows connectivity for ${TargetSsid}: IPv4=$ipv4 IPv6=$ipv6"
+            if ($ipv4 -eq "Internet" -or $ipv6 -eq "Internet") {
+                Write-Log "Windows reports internet connectivity on $TargetSsid; skipping portal login."
+                return $true
+            }
+        }
+    } catch {
+        Write-Log "Windows connectivity check failed: $($_.Exception.Message)"
+    }
+
+    return $false
 }
 
 function Test-CdpEndpoint {
@@ -291,6 +317,10 @@ try {
     $ssid = Wait-ForTargetSsid
     if ($ssid -ne $TargetSsid) {
         Write-Log "SSID is not $TargetSsid; skipping portal login."
+        exit 0
+    }
+
+    if (-not $SkipWindowsConnectivityCheck -and (Test-TargetNetworkHasInternet)) {
         exit 0
     }
 

@@ -47,22 +47,30 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
         self.assertIn("[int]$WlanEventDelaySeconds = 1", text)
         self.assertIn("-WindowStyle Hidden", text)
 
-    def test_task_retries_after_logon_to_catch_startup_wifi_autoconnect(self):
+    def test_task_does_not_use_scheduler_repetition_after_logon(self):
         text = (ROOT / "windows" / "create_zsclib_task.ps1").read_text(encoding="utf-8")
 
-        self.assertIn("[int]$LogonRetryIntervalMinutes = 1", text)
-        self.assertIn("[int]$LogonRetryDurationMinutes = 5", text)
-        self.assertIn("<Repetition>", text)
-        self.assertIn("<Interval>PT${LogonRetryIntervalMinutes}M</Interval>", text)
-        self.assertIn("<Duration>PT${LogonRetryDurationMinutes}M</Duration>", text)
+        self.assertIn("[int]$DelaySeconds = 1", text)
+        self.assertNotIn("LogonRetryIntervalMinutes", text)
+        self.assertNotIn("LogonRetryDurationMinutes", text)
+        self.assertNotIn("<Repetition>", text)
 
-    def test_runner_waits_briefly_for_target_ssid_after_startup(self):
+    def test_runner_waits_for_startup_ssid_but_skips_other_connected_wifi(self):
         text = (ROOT / "windows" / "run_zsclib_auto_login.ps1").read_text(encoding="utf-8")
 
-        self.assertIn("[int]$WaitForTargetSsidSeconds = 60", text)
+        self.assertIn("[int]$WaitForTargetSsidSeconds = 180", text)
         self.assertIn("[int]$SsidPollIntervalSeconds = 2", text)
         self.assertIn("function Wait-ForTargetSsid", text)
         self.assertIn("waiting for SSID", text)
+        self.assertIn("if ($ssid -and $ssid -ne $TargetSsid)", text)
+        self.assertIn("connected to non-target SSID", text)
+
+    def test_runner_skips_chrome_when_windows_reports_internet_on_target_ssid(self):
+        text = (ROOT / "windows" / "run_zsclib_auto_login.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("function Test-TargetNetworkHasInternet", text)
+        self.assertIn("Get-NetConnectionProfile", text)
+        self.assertIn("Windows reports internet connectivity", text)
 
     def test_runner_uses_msftconnecttest_only(self):
         text = (ROOT / "windows" / "run_zsclib_auto_login.ps1").read_text(encoding="utf-8")
@@ -89,7 +97,7 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
 
         self.assertIn("function Get-RecentConnectedSsidFromEventLog", text)
         self.assertIn("Get-WinEvent", text)
-        self.assertIn("[int]$SsidEventFallbackMaxAgeSeconds = 1800", text)
+        self.assertIn("[int]$SsidEventFallbackMaxAgeSeconds = 120", text)
         self.assertIn("SsidEventFallbackMaxAgeSeconds", text)
         self.assertIn("SSID from recent WLAN event fallback", text)
 
@@ -107,10 +115,8 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
         text = (ROOT / "windows" / "install_zsclib_task_admin.ps1").read_text(encoding="utf-8")
 
         self.assertIn("[int]$WlanEventDelaySeconds = 1", text)
-        self.assertIn("[int]$LogonRetryIntervalMinutes = 1", text)
-        self.assertIn("[int]$LogonRetryDurationMinutes = 5", text)
-        self.assertIn("-LogonRetryIntervalMinutes", text)
-        self.assertIn("-LogonRetryDurationMinutes", text)
+        self.assertNotIn("LogonRetryIntervalMinutes", text)
+        self.assertNotIn("LogonRetryDurationMinutes", text)
         self.assertIn("-Verb RunAs", text)
         self.assertIn("-NoExit", text)
         self.assertIn("ReadLine", text)
@@ -152,8 +158,8 @@ class ZSClibWindowsScriptsTests(unittest.TestCase):
         text = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("开机自动连接", text)
-        self.assertIn("每 1 分钟", text)
-        self.assertIn("5 分钟", text)
+        self.assertIn("最多等待 180 秒", text)
+        self.assertNotIn("每 1 分钟", text)
 
 
 if __name__ == "__main__":
